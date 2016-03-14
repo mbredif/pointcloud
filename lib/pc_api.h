@@ -421,5 +421,13 @@ PCPATCH* pc_patch_filter_equal_by_name(const PCPATCH *pa, const char *name, doub
 /** Subset batch based on range condition on dimension */
 PCPATCH* pc_patch_filter_between_by_name(const PCPATCH *pa, const char *name, double val1, double val2);
 
+/** Interpolated point on dimension given a patch. Issues warning when encountering duplicate values on dimension */
+PCPOINT *pc_point_interp(const PCPATCH *pa, const char *name, double value, char sorted);
+
+/** optimized PC_Patch(PC_Interpolate(p1,attr1,PC_Get(pt2,attr2), sorted1)) from PC_explode(p2) as pt2 */
+PCPATCH *pc_patch_interp(
+    const PCPATCH *p1, const PCPATCH *p2,
+    const char *name1, const char *name2,
+    char sorted1, char sorted2);
 
 #endif /* _PC_API_H */

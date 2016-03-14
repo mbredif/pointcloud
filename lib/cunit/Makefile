@@ -10,6 +10,7 @@ EXE = cu_tester
 OBJS =	\
 	cu_tester.o \
 	cu_pc_bytes.o \
+	cu_pc_interp.o \
 	cu_pc_schema.o \
 	cu_pc_point.o \
 	cu_pc_patch.o \

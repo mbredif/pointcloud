@@ -29,9 +29,11 @@ Datum pcpatch_compression(PG_FUNCTION_ARGS);
 Datum pcpatch_intersects(PG_FUNCTION_ARGS);
 Datum pcpatch_get_stat(PG_FUNCTION_ARGS);
 Datum pcpatch_filter(PG_FUNCTION_ARGS);
+Datum pcpatch_interp(PG_FUNCTION_ARGS);
 Datum pcpatch_size(PG_FUNCTION_ARGS);
 Datum pcpoint_size(PG_FUNCTION_ARGS);
 Datum pcpoint_pcid(PG_FUNCTION_ARGS);
+Datum pcpoint_interp(PG_FUNCTION_ARGS);
 Datum pc_version(PG_FUNCTION_ARGS);
 
 /* Generic aggregation functions */
@@ -946,4 +948,86 @@ Datum pcpatch_filter(PG_FUNCTION_ARGS)
 }
 
 
+
+/** PC_Interpolate(patch pcpatch, dimname text, value float8, sorted bool) returns PcPoint */
+PG_FUNCTION_INFO_V1(pcpoint_interp);
+Datum pcpoint_interp(PG_FUNCTION_ARGS)
+{
+	SERIALIZED_PATCH *serpatch = PG_GETARG_SERPATCH_P(0);
+	PCSCHEMA *schema = pc_schema_from_pcid(serpatch->pcid, fcinfo);
+	char *dim_name = text_to_cstring(PG_GETARG_TEXT_P(1));
+	float8 value = PG_GETARG_FLOAT8(2);
+	bool sorted = PG_GETARG_BOOL(3);
+	PCPATCH *patch = NULL;
+	PCPOINT *pt = NULL;
+	SERIALIZED_POINT *serpt = NULL;	
+
+pcinfo("%d",__LINE__);
+	patch = pc_patch_deserialize(serpatch, schema);
+	if(patch) pt = pc_point_interp(patch,dim_name,value,sorted);	
+
+pcinfo("%d",__LINE__);
+	pfree(dim_name);
+	if(patch) pc_patch_free(patch);
+	PG_FREE_IF_COPY(serpatch, 0);	
+
+	if(!pt) PG_RETURN_NULL();	
+
+	serpt = pc_point_serialize(pt);
+	pc_point_free(pt);
+	PG_RETURN_POINTER(serpt);
+}
+
+/** PC_Interpolate(patch1 pcpatch, patch2 pcpatch, dimname1 text, dimname2 text,
+ *			sorted1 bool, sorted2 bool) returns PcPatch */
+PG_FUNCTION_INFO_V1(pcpatch_interp);
+Datum pcpatch_interp(PG_FUNCTION_ARGS)
+{
+	SERIALIZED_PATCH *serpatch1, *serpatch2, *serpatch;
+	PCSCHEMA *schema1, *schema2;
+	char *dim_name1, *dim_name2;
+	bool sorted1, sorted2;
+	PCPATCH *p1, *p2, *pa;
+	
+
+	if(PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2))
+		PG_RETURN_NULL();	
+
+	serpatch1 = PG_GETARG_SERPATCH_P(0);
+	serpatch2 = PG_GETARG_SERPATCH_P(1);
+    schema1 = pc_schema_from_pcid(serpatch1->pcid, fcinfo);
+	p1 = pc_patch_deserialize(serpatch1, schema1);
+	if(!p1) 
+	{
+		elog(ERROR, "failed to deserialize patch");
+		PG_RETURN_NULL();
+	}
+    schema2 = pc_schema_from_pcid(serpatch2->pcid, fcinfo);
+	p2 = pc_patch_deserialize(serpatch2, schema2);
+	if(!p2) 
+	{
+        pc_patch_free(p1);
+		elog(ERROR, "failed to deserialize patch");
+		PG_RETURN_NULL();
+	}
+	
+	dim_name1 = text_to_cstring(PG_GETARG_TEXT_P(2));
+	dim_name2 = text_to_cstring(PG_GETARG_TEXT_P(PG_ARGISNULL(3) ? 2 : 3));
+	sorted1 = PG_GETARG_BOOL(4);
+	sorted2 = PG_GETARG_BOOL(5);	
+
+
+    pa = pc_patch_interp(p1,p2,dim_name1,dim_name2,sorted1,sorted2);
+    
+	PG_FREE_IF_COPY(serpatch1, 0);
+	PG_FREE_IF_COPY(serpatch2, 1);
+	pfree(dim_name1);
+	pfree(dim_name2);
+	
+	if(!pa) PG_RETURN_NULL();
+	
+	serpatch = pc_patch_serialize(pa,NULL);
+	pc_patch_free(pa);
+	PG_RETURN_POINTER(serpatch);
+}
 

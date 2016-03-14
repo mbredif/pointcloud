@@ -118,6 +118,8 @@ double pc_value_unscale_unoffset(double val, const PCDIMENSION *dim);
 /** Read interpretation type from buffer and cast to double */
 double pc_double_from_ptr(const uint8_t *ptr, uint32_t interpretation);
 
+double pc_value_from_ptr(const uint8_t *ptr, const PCDIMENSION *dim);
+
 /** Write value to buffer in the interpretation type */
 int pc_double_to_ptr(uint8_t *ptr, uint32_t interpretation, double val);
 
