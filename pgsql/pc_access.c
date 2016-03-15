@@ -962,11 +962,9 @@ Datum pcpoint_interp(PG_FUNCTION_ARGS)
 	PCPOINT *pt = NULL;
 	SERIALIZED_POINT *serpt = NULL;	
 
-pcinfo("%d",__LINE__);
 	patch = pc_patch_deserialize(serpatch, schema);
 	if(patch) pt = pc_point_interp(patch,dim_name,value,sorted);	
 
-pcinfo("%d",__LINE__);
 	pfree(dim_name);
 	if(patch) pc_patch_free(patch);
 	PG_FREE_IF_COPY(serpatch, 0);	

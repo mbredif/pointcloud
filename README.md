@@ -432,6 +432,30 @@ Now that you have created two tables, you'll see entries for them in the `pointc
 > Returns a patch with only points whose values are the same as the supplied values
 > for the requested dimension.
 
+**PC_Interpolate(p pcpatch, dimname text, float8 value, sorted boolean default false)** returns **pcpoint**
+
+> Returns the pcpoint resulting from the linear interpolation of the pcpoints of the input patch
+> at the query value on the given dimension. Returns NULL if value is not contained in
+> **[PC_PatchMin(dimname),PC_PatchMin(dimname))**. Note that the min value is included and the max value is excluded.
+> **sorted** is a hint that enables a binary search optimization. Results are undefined if the sorted hint is set
+> whereas the dimension is not sorted.
+>
+>     SELECT PC_Interpolate(pa,'x',-126.419)) FROM patches WHERE id = 7;
+>     {"pcid":1,"pt":[-126.42,45.58,58,5]}
+> Note that double values are used during the interpolation but are quantized in the resulting pcpoint according
+> to the schema. This rounding may lead to a resulting point with an interpolated value equal to the max if the query
+> value was slightly inferior.
+
+**PC_Interpolate(p1 pcpatch, p2 pcpatch, dimname1 text, dimname2 text default dimname1, sorted1 boolean default false, sorted2 boolean default false)** returns **pcpatch**
+
+> Conceptually, it first extracts the values of patch p2 at dimension dimname2, similar to
+> **pc_get(pc_explode(p2),dimname2) as value** and then returns as a new patch the interpolated points from patch p1 
+> at these values, similar to **PC_patch(pc_interpolate(p1,dimname1,value,sorted1)))**
+> Thus the resulting patch has as many points as there are interpolating values in the '[min,max)' interval
+> of interpolated values in p1, or is NULL if none are present.
+> As for the pcpoint-returning version, sorted1 and sorted2 are hints enabling optimizations and results
+> are undefined if incorrectly set.
+
 **PC_Compress(p pcpatch,global_compression_scheme text,compression_config text)** returns **pcpatch** (from 1.1.0)
 
 > Compress a patch with a manually specified scheme.
