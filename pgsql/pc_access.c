@@ -993,34 +993,36 @@ Datum pcpatch_interp(PG_FUNCTION_ARGS)
 
 	serpatch1 = PG_GETARG_SERPATCH_P(0);
 	serpatch2 = PG_GETARG_SERPATCH_P(1);
-    schema1 = pc_schema_from_pcid(serpatch1->pcid, fcinfo);
+        schema1 = pc_schema_from_pcid(serpatch1->pcid, fcinfo);
 	p1 = pc_patch_deserialize(serpatch1, schema1);
 	if(!p1) 
 	{
-		elog(ERROR, "failed to deserialize patch");
-		PG_RETURN_NULL();
+            elog(ERROR, "failed to deserialize patch");
+            PG_RETURN_NULL();
 	}
-    schema2 = pc_schema_from_pcid(serpatch2->pcid, fcinfo);
+        schema2 = pc_schema_from_pcid(serpatch2->pcid, fcinfo);
 	p2 = pc_patch_deserialize(serpatch2, schema2);
 	if(!p2) 
 	{
-        pc_patch_free(p1);
-		elog(ERROR, "failed to deserialize patch");
-		PG_RETURN_NULL();
+            pc_patch_free(p1);
+            elog(ERROR, "failed to deserialize patch");
+            PG_RETURN_NULL();
 	}
 	
+	PG_FREE_IF_COPY(serpatch1, 0);
+	PG_FREE_IF_COPY(serpatch2, 1);
 	dim_name1 = text_to_cstring(PG_GETARG_TEXT_P(2));
 	dim_name2 = text_to_cstring(PG_GETARG_TEXT_P(PG_ARGISNULL(3) ? 2 : 3));
 	sorted1 = PG_GETARG_BOOL(4);
 	sorted2 = PG_GETARG_BOOL(5);	
 
 
-    pa = pc_patch_interp(p1,p2,dim_name1,dim_name2,sorted1,sorted2);
+        pa = pc_patch_interp(p1,p2,dim_name1,dim_name2,sorted1,sorted2);
     
-	PG_FREE_IF_COPY(serpatch1, 0);
-	PG_FREE_IF_COPY(serpatch2, 1);
-	pfree(dim_name1);
-	pfree(dim_name2);
+        pc_patch_free(p1);
+        pc_patch_free(p2);
+        pfree(dim_name1);
+        pfree(dim_name2);
 	
 	if(!pa) PG_RETURN_NULL();
 	

@@ -24,7 +24,7 @@ pc_compare_uncompressed_interp(const void *a, const void *b, void *arg)
   return ((da > db) - (da < db));
 }
 
-// bsearch like binary search for a lower bound within a sorted range, returns base if key is below
+// bsearch like binary search for a lower bound within a sorted range
 // adapted from https://github.com/ngg/barelibc/blob/master/src/stdlib/bsearch.c
 void * blower_arg(
         const void *key,
