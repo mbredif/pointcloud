@@ -147,6 +147,10 @@ CREATE OR REPLACE FUNCTION PC_Get(pt pcpoint, dimname text)
 	RETURNS numeric AS 'MODULE_PATHNAME', 'pcpoint_get_value'
 	LANGUAGE 'c' IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION PC_Record(pt pcpoint)
+	RETURNS record AS 'MODULE_PATHNAME', 'pcpoint_record'
+	LANGUAGE 'c' IMMUTABLE STRICT;
+
 -- Availability: 1.1.0
 CREATE OR REPLACE FUNCTION PC_Get(pt pcpoint)
 	RETURNS float8[] AS 'MODULE_PATHNAME', 'pcpoint_get_values'
@@ -154,6 +158,10 @@ CREATE OR REPLACE FUNCTION PC_Get(pt pcpoint)
 
 CREATE OR REPLACE FUNCTION PC_MakePoint(pcid integer, vals float8[])
 	RETURNS pcpoint AS 'MODULE_PATHNAME', 'pcpoint_from_double_array'
+	LANGUAGE 'c' IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION PC_MakePoint(pcid integer, r record)
+	RETURNS pcpoint AS 'MODULE_PATHNAME', 'pcpoint_from_record'
 	LANGUAGE 'c' IMMUTABLE STRICT;
 
 CREATE OR REPLACE FUNCTION PC_AsText(p pcpoint)
@@ -309,6 +317,10 @@ CREATE OR REPLACE FUNCTION PC_IsSorted(p pcpatch, attr text[], strict boolean de
 	RETURNS boolean AS 'MODULE_PATHNAME', 'pcpatch_is_sorted'
 	LANGUAGE 'c' IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION PC_Record(pa pcpatch)
+	RETURNS SETOF record AS 'MODULE_PATHNAME', 'pcpatch_record'
+	LANGUAGE 'c' IMMUTABLE STRICT;
+
 -------------------------------------------------------------------
 --  POINTCLOUD_COLUMNS
 -------------------------------------------------------------------
@@ -383,7 +395,7 @@ CREATE OR REPLACE FUNCTION pcpoint_agg_transfn (pointcloud_abs, pcpoint)
 	LANGUAGE 'c';
 
 CREATE OR REPLACE FUNCTION pcpoint_agg_final_array (pointcloud_abs)
-	RETURNS pcpoint[] AS 'MODULE_PATHNAME', 'pcpoint_agg_final_array'
+	RETURNS pcpoint[] AS 'MODULE_PATHNAME', 'pointcloud_agg_final_array'
 	LANGUAGE 'c';
 
 CREATE OR REPLACE FUNCTION pcpoint_agg_final_pcpatch (pointcloud_abs)
@@ -405,11 +417,30 @@ CREATE AGGREGATE PC_Point_Agg (
 );
 
 -------------------------------------------------------------------
+--  AGGREGATE RECORDS
+-------------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION pcrecord_agg_transfn (pointcloud_abs, record)
+	RETURNS pointcloud_abs AS 'MODULE_PATHNAME', 'pointcloud_agg_transfn'
+	LANGUAGE 'c';
+
+CREATE OR REPLACE FUNCTION pcrecord_agg_final_pcpatch (pointcloud_abs)
+	RETURNS pcpatch AS 'MODULE_PATHNAME', 'pcrecord_agg_final_pcpatch'
+	LANGUAGE 'c';
+
+CREATE AGGREGATE PC_Patch (
+	BASETYPE = record,
+	SFUNC = pcrecord_agg_transfn,
+	STYPE = pointcloud_abs,
+	FINALFUNC = pcrecord_agg_final_pcpatch
+);
+
+-------------------------------------------------------------------
 --  AGGREGATE / EXPLODE PCPATCH
 -------------------------------------------------------------------
 
 CREATE OR REPLACE FUNCTION pcpatch_agg_final_array (pointcloud_abs)
-	RETURNS pcpatch[] AS 'MODULE_PATHNAME', 'pcpatch_agg_final_array'
+	RETURNS pcpatch[] AS 'MODULE_PATHNAME', 'pointcloud_agg_final_array'
 	LANGUAGE 'c';
 
 CREATE OR REPLACE FUNCTION pcpatch_agg_final_pcpatch (pointcloud_abs)

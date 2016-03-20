@@ -120,3 +120,28 @@ uint8_t* pc_patch_to_geometry_wkb_envelope(const SERIALIZED_PATCH *pa, const PCS
 uint32 pcid_from_datum(Datum d);
 
 PCSTATS* pc_patch_stats_deserialize(const PCSCHEMA *schema, const uint8_t *buf);
+
+Oid pc_interpretation_oid(uint32_t interp);
+
+
+enum PC_RECORDFUNCTIONS
+{
+	PC_FUN_NONE    = 0,
+	PC_FUN_MIN     = 1,
+	PC_FUN_MAX     = 2,
+	PC_FUN_AVG     = 3,
+	PC_FUN_RANGE   = 4,
+	PC_FUN_ROW     = 10,
+	PC_FUN_PCID    = 11,
+	PC_FUN_SRID    = 12,
+};
+
+typedef struct {
+	char *attname; // not owned when got from pcparse_attname (substring of input char *name)
+	int nattname;
+	enum PC_RECORDFUNCTIONS fun;
+	bool raw;
+} parsed_attname;
+
+parsed_attname pcparse_attname(char *name);
+void pcinfo_attname(const parsed_attname* pa);

@@ -12,6 +12,7 @@
 #include "pc_pgsql.h"      /* Common PgSQL support for our type */
 #include "utils/numeric.h"
 #include "funcapi.h"
+#include "access/htup_details.h"
 #include "lib/stringinfo.h"
 #include "pc_api_internal.h" /* for pcpatch_summary */
 
@@ -22,6 +23,8 @@ void pc_cstring_array_free(const char **array, int nelems);
 /* General SQL functions */
 Datum pcpoint_get_value(PG_FUNCTION_ARGS);
 Datum pcpoint_get_values(PG_FUNCTION_ARGS);
+Datum pcpoint_record(PG_FUNCTION_ARGS);
+Datum pcpatch_record(PG_FUNCTION_ARGS);
 Datum pcpatch_from_pcpoint_array(PG_FUNCTION_ARGS);
 Datum pcpatch_from_pcpatch_array(PG_FUNCTION_ARGS);
 Datum pcpatch_uncompress(PG_FUNCTION_ARGS);
@@ -43,16 +46,18 @@ Datum pc_version(PG_FUNCTION_ARGS);
 
 /* Generic aggregation functions */
 Datum pointcloud_agg_transfn(PG_FUNCTION_ARGS);
+Datum pointcloud_agg_final_array(PG_FUNCTION_ARGS);
 Datum pointcloud_abs_in(PG_FUNCTION_ARGS);
 Datum pointcloud_abs_out(PG_FUNCTION_ARGS);
 
-/* Point finalizers */
+/* Point finalizer */
 Datum pcpoint_agg_final_pcpatch(PG_FUNCTION_ARGS);
-Datum pcpoint_agg_final_array(PG_FUNCTION_ARGS);
 
-/* Patch finalizers */
+/* Patch finalizer */
 Datum pcpatch_agg_final_array(PG_FUNCTION_ARGS);
-Datum pcpatch_agg_final_pcpatch(PG_FUNCTION_ARGS);
+
+/* Record finalizer */
+Datum pcrecord_agg_final_pcpatch(PG_FUNCTION_ARGS);
 
 /* Deaggregation functions */
 Datum pcpatch_unnest(PG_FUNCTION_ARGS);
@@ -83,6 +88,445 @@ Datum pcpoint_get_value(PG_FUNCTION_ARGS)
 	pfree(dim_str);
 	pc_point_free(pt);
 	PG_RETURN_DATUM(DirectFunctionCall1(float8_numeric, Float8GetDatum(double_result)));
+}
+
+
+// How to deal with unsigned OIDs ?
+static Oid INTERPRETATION_OIDS[NUM_INTERPRETATIONS] =
+{
+	UNKNOWNOID,    /* PC_UNKNOWN */
+	CHAROID, CHAROID,  /* PC_INT8, PC_UINT8, */
+	INT2OID, INT2OID,  /* PC_INT16, PC_UINT16 */
+	INT4OID, INT4OID,  /* PC_INT32, PC_UINT32 */
+	INT8OID, INT8OID,  /* PC_INT64, PC_UINT64 */
+	FLOAT8OID, FLOAT4OID   /* PC_DOUBLE, PC_FLOAT */
+};
+
+
+/** Convert XML string token to type interpretation number */
+Oid
+pc_interpretation_oid(uint32_t interp)
+{
+	if ( interp < NUM_INTERPRETATIONS )
+		return INTERPRETATION_OIDS[interp];
+	else
+		return UNKNOWNOID;
+}
+
+Datum pc_datum_from_ptr(const uint8_t *ptr, uint32_t interpretation);
+
+Datum
+pc_datum_from_ptr(const uint8_t *ptr, uint32_t interpretation)
+{
+	switch( interpretation )
+	{
+	case PC_UINT8:
+	{
+		uint8_t v;
+		memcpy(&(v), ptr, sizeof(uint8_t));
+		return UInt8GetDatum(v);
+	}
+	case PC_UINT16:
+	{
+		uint16_t v;
+		memcpy(&(v), ptr, sizeof(uint16_t));
+		return UInt16GetDatum(v);
+	}
+	case PC_UINT32:
+	{
+		uint32_t v;
+		memcpy(&(v), ptr, sizeof(uint32_t));
+		return UInt32GetDatum(v);
+	}
+/*
+	case PC_UINT64:
+	{
+		uint64_t v;
+		memcpy(&(v), ptr, sizeof(uint64_t));
+		return UInt64GetDatum(v); // does not exist !
+	}
+*/
+	case PC_INT8:
+	{
+		int8_t v;
+		memcpy(&(v), ptr, sizeof(int8_t));
+		return Int8GetDatum(v);
+	}
+	case PC_INT16:
+	{
+		int16_t v;
+		memcpy(&(v), ptr, sizeof(int16_t));
+		return Int16GetDatum(v);
+	}
+	case PC_INT32:
+	{
+		int32_t v;
+		memcpy(&(v), ptr, sizeof(int32_t));
+		return Int32GetDatum(v);
+	}
+	case PC_INT64:
+	{
+		int64_t v;
+		memcpy(&(v), ptr, sizeof(int64_t));
+		return Int64GetDatum(v);
+	}
+	case PC_FLOAT:
+	{
+		float v;
+		memcpy(&(v), ptr, sizeof(float));
+		return Float4GetDatum(v);
+	}
+	case PC_DOUBLE:
+	{
+		double v;
+		memcpy(&(v), ptr, sizeof(double));
+		return Float8GetDatum(v);
+	}
+	default:
+	{
+		return (Datum) 0;
+	}
+	}
+}
+
+void pcinfo_attname(const parsed_attname* pa)
+{
+	const char *s[] = { "","min(","max(","avg(","row(","pcid(","srid(" };
+	pcinfo("%s%s%.*s%s%s",
+		pa->raw?"raw(":"",
+		s[pa->fun],
+		pa->nattname,
+		pa->attname,
+		pa->fun?")":"",
+		pa->raw?")":""
+	);
+}
+
+parsed_attname pcparse_attname(char *name)
+{
+	parsed_attname res;
+	char *tok = NULL;
+	bool opening = true;
+	char *spaces = " \t\r\n";
+	char *all = " \t\r\n()";
+	int pos, len, len2, paren=0;
+	res.fun = PC_FUN_NONE;
+	res.attname = NULL;
+	res.nattname = 0;
+	res.raw = false;
+	for (pos = 0; name[pos]; ) {
+		pos += strspn(name+pos, spaces); // consume spaces
+		tok = name + pos; // get token
+		len = strcspn(tok, all); // get token length
+		len2 = strspn(tok+len, spaces); // consume spaces
+		pos += len + len2;
+		switch(name[pos]) {
+		case '(' :
+		{
+			if(!opening)
+					elog(ERROR,"reopening parentheses in %s",name);
+			++paren;
+			++pos;
+			if(len==3 && strncasecmp(tok,"raw",3)==0)
+			{
+				if(res.raw)
+					elog(ERROR,"raw called twice in %s",name);
+				res.raw = true;
+			}
+			else if(len>0)
+			{
+				if(res.fun != PC_FUN_NONE)
+					elog(ERROR,"more than 1 function called in \"%s\", at token \"%.*s\"",name,len,tok);
+
+				if(len==3)
+				{
+					if     (strncasecmp(tok,"row",3)==0) res.fun = PC_FUN_ROW;
+					else if(strncasecmp(tok,"min",3)==0) res.fun = PC_FUN_MIN;
+					else if(strncasecmp(tok,"max",3)==0) res.fun = PC_FUN_MAX;
+					else if(strncasecmp(tok,"avg",3)==0) res.fun = PC_FUN_AVG;
+
+				}
+				else if(len==4)
+				{
+					if     (strncasecmp(tok,"pcid",4)==0) res.fun = PC_FUN_PCID;
+					else if(strncasecmp(tok,"srid",4)==0) res.fun = PC_FUN_SRID;
+				}
+
+				if(res.fun == PC_FUN_NONE)
+					elog(ERROR,"unsupported function in \"%s\", at token \"%.*s\"",name,len,tok);
+			}
+			break;
+		}
+		case ')' :
+		{
+			opening = false;
+			--paren;
+			++pos;
+			if(paren<0)
+				elog(ERROR,"unbalanced parentheses in %s",name);
+			// no break, continue to case 0
+		}
+		case 0 :
+		{
+			if(len>0)
+			{
+				if(res.attname)
+					elog(ERROR,"more than 1 attribute in %s",name);
+				res.attname = tok;
+				res.nattname = len;
+			}
+			break;
+		}
+		default :
+			elog(ERROR,"Unexpected character at position %d in %s",pos,name);
+		}
+	}
+	if(paren!=0)
+		elog(ERROR, "unbalanced parentheses in %s",name);
+
+	if((res.attname==NULL) != (res.fun==PC_FUN_PCID || res.fun==PC_FUN_SRID || res.fun==PC_FUN_ROW))
+		elog(ERROR, "function arity mismatch or missing attribute name in %s",name);
+
+//    pcinfo_attname(&res);
+	return res;
+}
+
+
+PG_FUNCTION_INFO_V1(pcpoint_record);
+Datum pcpoint_record(PG_FUNCTION_ARGS)
+{
+	SERIALIZED_POINT *serpt;
+	PCSCHEMA *schema;
+	PCPOINT *pt;
+	Datum *elems;
+	int i;
+	bool *nulls;
+
+	TupleDesc         tupdesc;
+	HeapTuple         tuple;
+
+	serpt = PG_GETARG_SERPOINT_P(0);
+	schema = pc_schema_from_pcid(serpt->pcid, fcinfo);
+	pt = pc_point_deserialize(serpt, schema);
+	if ( ! pt ) PG_RETURN_NULL();
+
+	if(get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "pcpoint_record: result type is not composite");
+	BlessTupleDesc( tupdesc );
+
+	elems = (Datum * )palloc(tupdesc->natts * sizeof(Datum) );
+	nulls = palloc( tupdesc->natts * sizeof( bool ) );
+
+	i = tupdesc->natts;
+	while (i--) {
+		Form_pg_attribute attr = tupdesc->attrs[i];
+		parsed_attname parsed;
+		Oid oid;
+		if(attr->attisdropped) continue;
+		parsed = pcparse_attname(NameStr(attr->attname));
+
+		elems[i] = (Datum) 0;
+		nulls[i] = false;
+
+		switch(parsed.fun) {
+		case PC_FUN_ROW  : oid = INT4OID; elems[i] = UInt32GetDatum(0); break;
+		case PC_FUN_PCID : oid = INT4OID; elems[i] = UInt32GetDatum(schema->pcid); break;
+		case PC_FUN_SRID : oid = INT4OID; elems[i] = UInt32GetDatum(schema->srid); break;
+		default : // NONE, MIN, MAX, AVG
+		{
+			PCDIMENSION *dim;
+			char tmp = parsed.attname[parsed.nattname];
+			parsed.attname[parsed.nattname] = 0;
+			dim = pc_schema_get_dimension_by_name(pt->schema, parsed.attname);
+			parsed.attname[parsed.nattname] = tmp;
+			if(!dim)
+			{
+				elog(ERROR, "pcpoint_record: dimension \"%.*s\" not found in schema, parsing \"%s\"",parsed.nattname,parsed.attname,NameStr(attr->attname));
+			}
+
+			if(parsed.raw)
+			{
+				oid = pc_interpretation_oid(dim->interpretation);
+				elems[i] = pc_datum_from_ptr(pt->data + dim->byteoffset, dim->interpretation);
+			}
+			else
+			{
+				double val = 0;
+				pc_point_get_double(pt,dim,&val);
+				elems[i] = Float8GetDatum(val);
+				oid = FLOAT8OID;
+			}
+		}
+		}
+
+		if(oid != attr->atttypid)
+		{
+			elog(ERROR, "pcpoint_record: Incorrect Oid for \"%.*s\" in \"%s\" (%d!=%d)",parsed.nattname,parsed.attname,NameStr(attr->attname),oid,attr->atttypid);
+		}
+	}
+	pc_point_free(pt);
+	tuple = heap_form_tuple( tupdesc, elems, nulls );
+	pfree( nulls );
+	pfree( elems );
+	PG_RETURN_DATUM( HeapTupleGetDatum( tuple ) );
+}
+
+
+PG_FUNCTION_INFO_V1(pcpatch_record);
+Datum pcpatch_record(PG_FUNCTION_ARGS)
+{
+	typedef struct
+	{
+		Datum *elems;
+		bool *nulls;
+		bool *raw;
+		bool *row;
+		PCDIMENSION **dim;
+		PCPOINTLIST *pointlist;
+	} pcpatch_record_fctx;
+
+	FuncCallContext *funcctx;
+	pcpatch_record_fctx *fctx;
+	MemoryContext oldcontext;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		SERIALIZED_PATCH *serpatch;
+		PCSCHEMA *schema;
+		PCPATCH *patch;
+		PCPOINT *pt, *pt2;
+		int i;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		fctx = (pcpatch_record_fctx *) palloc(sizeof(pcpatch_record_fctx));
+
+		serpatch = PG_GETARG_SERPATCH_P(0);
+		schema = pc_schema_from_pcid_uncached(serpatch->pcid);
+
+		patch = pc_patch_deserialize(serpatch, schema);
+		if ( ! patch )
+			elog(ERROR, "failed to deserialize patch");
+
+		if(get_call_result_type(fcinfo, NULL, &funcctx->tuple_desc) != TYPEFUNC_COMPOSITE)
+			elog(ERROR, "pcpatch_record: result type is not composite");
+
+		BlessTupleDesc( funcctx->tuple_desc );
+
+		i = funcctx->tuple_desc->natts;
+		fctx->elems = (Datum * )palloc( i * sizeof(Datum) );
+		fctx->nulls = palloc( i * sizeof( bool ) );
+		fctx->raw = palloc( i * sizeof( bool ) );
+		fctx->row = palloc( i * sizeof( bool ) );
+		fctx->dim = palloc( i * sizeof( PCDIMENSION * ) );
+
+		/* initialize state */
+		funcctx->max_calls = patch->npoints;
+		fctx->pointlist = pc_pointlist_from_patch(patch);
+
+		while (i--) {
+			Form_pg_attribute attr = funcctx->tuple_desc->attrs[i];
+			parsed_attname parsed;
+			Oid oid = UNKNOWNOID;
+			if(attr->attisdropped) continue;
+			parsed = pcparse_attname(NameStr(attr->attname));
+
+			fctx->elems[i] = (Datum) 0;
+			fctx->nulls[i] = false;
+			fctx->raw[i] = parsed.raw;
+			fctx->row[i] = false;
+			fctx->dim[i] = NULL;
+
+			pt = pt2 = NULL;
+			switch(parsed.fun) {
+			case PC_FUN_ROW   : oid = INT4OID; fctx->row[i] = true; break;
+			case PC_FUN_PCID  : oid = INT4OID; fctx->elems[i] = UInt32GetDatum(schema->pcid); break;
+			case PC_FUN_SRID  : oid = INT4OID; fctx->elems[i] = UInt32GetDatum(schema->srid); break;
+			case PC_FUN_MIN   : pt = &patch->stats->min; break;
+			case PC_FUN_MAX   : pt = &patch->stats->max; break;
+			case PC_FUN_AVG   : pt = &patch->stats->avg; break;
+			case PC_FUN_RANGE : pt = &patch->stats->avg; break;
+			case PC_FUN_NONE  : {}
+			}
+
+			if(parsed.attname) // min,max,avg or none
+			{
+				PCDIMENSION *dim;
+				char tmp = parsed.attname[parsed.nattname];
+				parsed.attname[parsed.nattname] = 0;
+				dim = fctx->dim[i] = pc_schema_get_dimension_by_name(schema, parsed.attname);
+				parsed.attname[parsed.nattname] = tmp;
+				if(!dim)
+				{
+					elog(ERROR, "pcpatch_record: dimension \"%.*s\" not found in schema, parsing \"%s\"",parsed.nattname,parsed.attname,NameStr(attr->attname));
+				}
+				oid = fctx->raw[i] ? pc_interpretation_oid(dim->interpretation) : FLOAT8OID;
+				if(pt) {
+					if(fctx->raw[i])
+					{
+						fctx->elems[i] = pc_datum_from_ptr(pt->data + dim->byteoffset, dim->interpretation);
+					}
+					else
+					{
+						double val = 0;
+						pc_point_get_double(pt,dim,&val);
+						fctx->elems[i] = Float8GetDatum(val);
+					}
+					fctx->dim[i] = NULL;
+				}
+			}
+
+			if(oid != attr->atttypid)
+			{
+				elog(ERROR, "pcpatch_record: Incorrect Oid for \"%.*s\" in \"%s\" (%d!=%d)",parsed.nattname,parsed.attname,NameStr(attr->attname),oid,attr->atttypid);
+			}
+		}
+
+		/* save user context, switch back to function context */
+		funcctx->user_fctx = fctx;
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	funcctx = SRF_PERCALL_SETUP();
+	fctx = funcctx->user_fctx;
+
+	if (funcctx->call_cntr < funcctx->max_calls)
+	{
+		HeapTuple tuple;
+		PCPOINT *pt = pc_pointlist_get_point(fctx->pointlist, funcctx->call_cntr);
+		int i = funcctx->tuple_desc->natts;
+		while (i--) {
+			if(fctx->dim[i])
+			{
+				if(fctx->raw[i])
+				{
+					fctx->elems[i] = pc_datum_from_ptr(pt->data + fctx->dim[i]->byteoffset, fctx->dim[i]->interpretation);
+				}
+				else
+				{
+					double val = 0;
+					pc_point_get_double(pt,fctx->dim[i],&val);
+					fctx->elems[i] = Float8GetDatum(val);
+				}
+			}
+			else if(fctx->row[i])
+			{
+				fctx->elems[i] = UInt32GetDatum(funcctx->call_cntr);
+			}
+
+		}
+		tuple = heap_form_tuple( funcctx->tuple_desc, fctx->elems, fctx->nulls );
+		SRF_RETURN_NEXT(funcctx,  HeapTupleGetDatum( tuple ) );
+	}
+	else
+	{
+		pfree(fctx->elems);
+		pfree(fctx->nulls);
+		pfree(fctx->raw);
+		pfree(fctx->row);
+		pfree(fctx->dim);
+		SRF_RETURN_DONE(funcctx);
+	}
 }
 
 /**
@@ -201,6 +645,88 @@ pcpatch_from_point_array(ArrayType *array, FunctionCallInfoData *fcinfo)
 	pc_pointlist_free(pl);
 	return pa;
 }
+
+
+static PCPATCH *
+pcpatch_from_record_array(ArrayType *array, FunctionCallInfoData *fcinfo)
+{
+	int nelems;
+	bits8 *bitmap;
+	size_t offset = 0;
+	int i;
+	uint32 pcid = 0;
+	PCPATCH *pa;
+	PCPOINTLIST *pl;
+	PCSCHEMA *schema = 0;
+
+pcinfo("%d",__LINE__);
+
+	/* How many things in our array? */
+	nelems = ArrayGetNItems(ARR_NDIM(array), ARR_DIMS(array));
+
+	/* PgSQL supplies a bitmap of which array entries are null */
+	bitmap = ARR_NULLBITMAP(array);
+
+	/* Empty array? Null return */
+	if ( nelems == 0 )
+		return NULL;
+
+	/* Make our holder */
+	pl = pc_pointlist_make(nelems);
+
+	offset = 0;
+	bitmap = ARR_NULLBITMAP(array);
+pcinfo("%d",__LINE__);
+	for ( i = 0; i < nelems; i++ )
+	{
+pcinfo("%d",__LINE__);
+		/* Only work on non-NULL entries in the array */
+		if ( ! array_get_isnull(bitmap, i) )
+		{
+			SERIALIZED_POINT *serpt = (SERIALIZED_POINT *)(ARR_DATA_PTR(array)+offset);
+			PCPOINT *pt;
+
+pcinfo("%d",__LINE__);
+			if ( ! schema )
+			{
+				schema = pc_schema_from_pcid(serpt->pcid, fcinfo);
+			}
+
+pcinfo("%d",__LINE__);
+			if ( ! pcid )
+			{
+				pcid = serpt->pcid;
+			}
+			else if ( pcid != serpt->pcid )
+			{
+				elog(ERROR, "pcpatch_from_point_array: pcid mismatch (%d != %d)", serpt->pcid, pcid);
+			}
+pcinfo("%d",__LINE__);
+
+			pt = pc_point_deserialize(serpt, schema);
+			if ( ! pt )
+			{
+				elog(ERROR, "pcpatch_from_point_array: point deserialization failed");
+			}
+
+pcinfo("%d",__LINE__);
+			pc_pointlist_add_point(pl, pt);
+pcinfo("%d",__LINE__);
+
+			offset += INTALIGN(VARSIZE(serpt));
+pcinfo("%d",__LINE__);
+		}
+
+	}
+
+	if ( pl->npoints == 0 )
+		return NULL;
+
+	pa = pc_patch_from_pointlist(pl);
+	pc_pointlist_free(pl);
+	return pa;
+}
+
 
 
 static PCPATCH *
@@ -403,8 +929,8 @@ pointcloud_agg_final(abs_trans *a, MemoryContext mctx, FunctionCallInfo fcinfo)
 	return makeMdArrayResult(state, 1, dims, lbs, mctx, false);
 }
 
-PG_FUNCTION_INFO_V1(pcpoint_agg_final_array);
-Datum pcpoint_agg_final_array(PG_FUNCTION_ARGS)
+PG_FUNCTION_INFO_V1(pointcloud_agg_final_array);
+Datum pointcloud_agg_final_array(PG_FUNCTION_ARGS)
 {
 	abs_trans *a;
 	Datum result = 0;
@@ -417,23 +943,6 @@ Datum pcpoint_agg_final_array(PG_FUNCTION_ARGS)
 	result = pointcloud_agg_final(a, CurrentMemoryContext, fcinfo);
 	PG_RETURN_DATUM(result);
 }
-
-
-PG_FUNCTION_INFO_V1(pcpatch_agg_final_array);
-Datum pcpatch_agg_final_array(PG_FUNCTION_ARGS)
-{
-	abs_trans *a;
-	Datum result = 0;
-
-	if (PG_ARGISNULL(0))
-		PG_RETURN_NULL();   /* returns null iff no input values */
-
-	a = (abs_trans*) PG_GETARG_POINTER(0);
-
-	result = pointcloud_agg_final(a, CurrentMemoryContext, fcinfo);
-	PG_RETURN_DATUM(result);
-}
-
 
 PG_FUNCTION_INFO_V1(pcpoint_agg_final_pcpatch);
 Datum pcpoint_agg_final_pcpatch(PG_FUNCTION_ARGS)
@@ -474,6 +983,29 @@ Datum pcpatch_agg_final_pcpatch(PG_FUNCTION_ARGS)
 
 	array = DatumGetArrayTypeP(pointcloud_agg_final(a, CurrentMemoryContext, fcinfo));
 	pa = pcpatch_from_patch_array(array, fcinfo);
+	if ( ! pa )
+		PG_RETURN_NULL();
+
+	serpa = pc_patch_serialize(pa, NULL);
+	pc_patch_free(pa);
+	PG_RETURN_POINTER(serpa);
+}
+
+PG_FUNCTION_INFO_V1(pcrecord_agg_final_pcpatch);
+Datum pcrecord_agg_final_pcpatch(PG_FUNCTION_ARGS)
+{
+	ArrayType *array;
+	abs_trans *a;
+	PCPATCH *pa;
+	SERIALIZED_PATCH *serpa;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();   /* returns null iff no input values */
+
+	a = (abs_trans*) PG_GETARG_POINTER(0);
+
+	array = DatumGetArrayTypeP(pointcloud_agg_final(a, CurrentMemoryContext, fcinfo));
+	pa = pcpatch_from_record_array(array, fcinfo);
 	if ( ! pa )
 		PG_RETURN_NULL();
 

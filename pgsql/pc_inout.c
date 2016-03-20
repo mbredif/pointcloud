@@ -28,6 +28,7 @@ Datum pcpoint_enforce_typmod(PG_FUNCTION_ARGS);
 Datum pcschema_is_valid(PG_FUNCTION_ARGS);
 Datum pcschema_get_ndims(PG_FUNCTION_ARGS);
 Datum pcpoint_from_double_array(PG_FUNCTION_ARGS);
+Datum pcpoint_from_record(PG_FUNCTION_ARGS);
 Datum pcpoint_as_text(PG_FUNCTION_ARGS);
 Datum pcpatch_as_text(PG_FUNCTION_ARGS);
 Datum pcpoint_as_bytea(PG_FUNCTION_ARGS);
@@ -228,6 +229,198 @@ Datum pcpoint_from_double_array(PG_FUNCTION_ARGS)
 
 	serpt = pc_point_serialize(pt);
 	pc_point_free(pt);
+	PG_RETURN_POINTER(serpt);
+}
+
+/*
+
+PG_FUNCTION_INFO_V1(pcpoint_record);
+Datum pcpoint_record(PG_FUNCTION_ARGS)
+{
+	SERIALIZED_POINT *serpt;
+	PCSCHEMA *schema;
+	PCPOINT *pt;
+	Datum *elems;
+	int i;
+	bool *nulls;
+	bool raw;
+
+	TupleDesc         tupdesc;
+	HeapTuple         tuple;
+
+	serpt = PG_GETARG_SERPOINT_P(0);
+	schema = pc_schema_from_pcid(serpt->pcid, fcinfo);
+	pt = pc_point_deserialize(serpt, schema);
+	if ( ! pt ) PG_RETURN_NULL();
+
+	if(get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+		elog(ERROR, "pcpoint_record: result type is not composite");
+	BlessTupleDesc( tupdesc );
+
+	elems = (Datum * )palloc(tupdesc->natts * sizeof(Datum) );
+	nulls = palloc( tupdesc->natts * sizeof( bool ) );
+
+	i = tupdesc->natts;
+	while (i--) {
+		Form_pg_attribute attr = tupdesc->attrs[i];
+		char *attname = pcstrdup(NameStr(attr->attname));
+		char *arg = strchr(attname,'(');
+		char *name = strtrim(attname);
+		elems[i] = (Datum) 0;
+		nulls[i] = true;
+		if(attr->attisdropped) continue;
+		raw = false;
+		while( arg )
+		{
+			char *end = strrchr(arg,')');
+			*arg++ = 0;
+			if(!end) elog(ERROR, "pcpoint_record: unmatched parentheses in \"%s\"",NameStr(attr->attname));
+			*end = 0;
+			name = strtrim(name);
+			arg = strtrim(arg);
+			if(*arg==0)
+			{
+				if(attr->atttypid != INT4OID )
+				{
+					elog(ERROR, "pcpoint_record: Oid of \"%s\" should be INT4OID",NameStr(attr->attname));
+				}
+
+				if(strcasecmp(name,"row" )==0) { elems[i] = UInt32GetDatum(0);
+				} else if(strcasecmp(name,"pcid")==0) { elems[i] = UInt32GetDatum(schema->pcid);
+				} else if(strcasecmp(name,"srid")==0) { elems[i] = UInt32GetDatum(schema->srid);
+				} else {
+					elog(ERROR, "pcpoint_record: \"%s\" not recognized in \"%s\"",name,NameStr(attr->attname));
+				}
+
+				if( raw )
+				{
+					elog(ERROR, "pcpoint_record: \"%s()\" does not have a raw value in \"%s\"",name,NameStr(attr->attname));
+				}
+				nulls[i] = false;
+				arg = NULL;
+
+			} else if(strcasecmp(name,"raw")==0) { raw = true;
+			} else if(strcasecmp(name,"min")==0) {
+			} else if(strcasecmp(name,"max")==0) {
+			} else if(strcasecmp(name,"avg")==0) {
+			} else if( *name != 0 )
+			{
+				elog(ERROR, "pcpatch_record: \"%s\" not recognized in \"%s\"",name,NameStr(attr->attname));
+			}
+			name = arg;
+			if(name) arg = strchr(name,'(');
+		}
+		if(name)
+		{
+			Oid oid;
+			PCDIMENSION *dim = pc_schema_get_dimension_by_name(pt->schema, name);
+			if(!dim)
+			{
+				elog(ERROR, "pcpoint_record: dimension \"%s\" not found in \"%s\"",name,NameStr(attr->attname));
+			}
+
+			oid = raw ? pc_interpretation_oid(dim->interpretation) : FLOAT8OID;
+			if(oid != attr->atttypid)
+			{
+				elog(ERROR, "pcpoint_record: Incorrect Oid for \"%s\" in \"%s\" (%d!=%d)",name,NameStr(attr->attname),oid,attr->atttypid);
+			}
+			nulls[i] = false;
+			if(raw)
+			{
+				elems[i] = pc_datum_from_ptr(pt->data + dim->byteoffset, dim->interpretation);
+			}
+			else
+			{
+				elems[i] = Float8GetDatum(pc_point_get_double(pt,dim));
+			}
+		}
+		pcfree(attname);
+	}
+	pc_point_free(pt);
+	tuple = heap_form_tuple( tupdesc, elems, nulls );
+	pfree( nulls );
+	pfree( elems );
+	PG_RETURN_DATUM( HeapTupleGetDatum( tuple ) );
+}
+*/
+
+#include "funcapi.h"
+#include "pc_api_internal.h"
+#include "access/htup_details.h"
+#include "utils/typcache.h"
+
+/**
+* pcpoint_from_record(integer pcid, record) returns PcPoint
+*/
+PG_FUNCTION_INFO_V1(pcpoint_from_record);
+Datum pcpoint_from_record(PG_FUNCTION_ARGS)
+{
+	uint32 pcid = PG_GETARG_INT32(0);
+	HeapTupleHeader tuple = PG_GETARG_HEAPTUPLEHEADER(1);
+	PCPOINT *pt;
+	PCSCHEMA *schema = pc_schema_from_pcid(pcid, fcinfo);
+	SERIALIZED_POINT *serpt;
+	bool isNull;
+	Oid oid;
+	Datum datum;
+	int i;
+	Oid			tupType;
+	int32		tupTypmod;
+	TupleDesc	tupDesc;
+
+
+	if ( ! schema )
+		elog(ERROR, "unable to load schema for pcid = %d", pcid);
+	pt = pc_point_make(schema);
+
+	tupType = HeapTupleHeaderGetTypeId(tuple);
+	tupTypmod = HeapTupleHeaderGetTypMod(tuple);
+	tupDesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+
+	i = tupDesc->natts;
+	while (i--)
+	{
+		Form_pg_attribute attr = tupDesc->attrs[i];
+		parsed_attname parsed = pcparse_attname(NameStr(attr->attname));
+		PCDIMENSION *dim;
+		HeapTupleData tmptup;
+		char tmp;
+
+		if(parsed.fun != PC_FUN_NONE) continue;
+		tmp = parsed.attname[parsed.nattname];
+		parsed.attname[parsed.nattname] = 0;
+		dim = pc_schema_get_dimension_by_name(schema, parsed.attname);
+		parsed.attname[parsed.nattname] = tmp;
+
+		if(!dim)
+		{
+			elog(ERROR, "pcpoint_from_record: dimension \"%.*s\" not found in \"%s\"",parsed.nattname,parsed.attname,NameStr(attr->attname));
+		}
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tuple);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tuple;
+
+		datum = heap_getattr(&tmptup,attr->attnum,tupDesc,&isNull);
+
+		if(parsed.raw)
+		{
+			oid = pc_interpretation_oid(dim->interpretation);
+			if(!isNull) memcpy(pt->data+dim->byteoffset, &datum, dim->size);
+		} else {
+			oid=FLOAT8OID;
+			if(!isNull) pc_point_set_double(pt,dim,DatumGetFloat8(datum));
+		}
+		if(oid != attr->atttypid)
+		{
+			elog(ERROR, "pcpoint_from_record: Incorrect Oid for \"%.*s\" in \"%s\" (%d!=%d)",parsed.nattname,parsed.attname,NameStr(attr->attname),oid,attr->atttypid);
+		}
+	}
+
+	serpt = pc_point_serialize(pt);
+	pc_point_free(pt);
+	ReleaseTupleDesc(tupDesc);
 	PG_RETURN_POINTER(serpt);
 }
 
