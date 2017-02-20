@@ -1,5 +1,6 @@
 [![Build Status](https://secure.travis-ci.org/pgpointcloud/pointcloud.png)]
 (http://travis-ci.org/pgpointcloud/pointcloud)
+[![codecov](https://codecov.io/gh/mbredif/pointcloud/branch/master/graph/badge.svg)](https://codecov.io/gh/mbredif/pointcloud)
 
 # Pointcloud #
 
