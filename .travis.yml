@@ -20,10 +20,13 @@ before_script:
   - ./autogen.sh
 
 script:
-  - ./configure CFLAGS="-Wall -O2 -g" --with-lazperf=/usr/local/
+  - ./configure CFLAGS="-Wall -O2 -g -coverage" --with-lazperf=/usr/local/
   - make
   - make check
   - valgrind --leak-check=full --error-exitcode=1 lib/cunit/cu_tester
   - sudo make install
   - make installcheck || { cat pgsql/regression.diffs && false; }
   - cd tools/benchmark_compression && sh compression_benchmark.sh
+
+after_success:
+  - bash <(curl -s https://codecov.io/bash)
