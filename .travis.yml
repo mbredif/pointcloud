@@ -27,9 +27,7 @@ script:
   - sudo make install
   - make installcheck || { cat pgsql/regression.diffs && false; }
   - cd tools/benchmark_compression && sh compression_benchmark.sh
-  - ls
-  - gcov *.c
-  - cd ../..
+  - cd -
   - cd lib && gcov *.c
   
 after_success:
