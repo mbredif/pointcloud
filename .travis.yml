@@ -26,10 +26,9 @@ script:
   - valgrind --leak-check=full --error-exitcode=1 lib/cunit/cu_tester
   - sudo make install
   - make installcheck || { cat pgsql/regression.diffs && false; }
-  - cd tools/benchmark_compression && sh compression_benchmark.sh
-  - cd -
-  - cd lib && gcov *.c *.cpp
-  - cd cunit && gcov *.c
+  - cd tools/benchmark_compression && sh compression_benchmark.sh ; cd -
+  - cd lib && gcov *.c ; cd -
+  - cd lib/cunit && gcov *.c ; cd -
   
 after_success:
   - bash <(curl -s https://codecov.io/bash)
