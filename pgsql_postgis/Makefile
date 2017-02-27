@@ -22,6 +22,11 @@ include $(PGXS)
 $(EXTENSION).control: $(EXTENSION).control.in Makefile
 	$(SED) -e 's/@POINTCLOUD_VERSION@/$(EXTVERSION)/' \
          -e 's/@POINTCLOUD_VERSION_MAJOR@/$(EXTVERSION_MAJOR)/' $< > $@
+	@cp $(EXTENSION).sql.in $(EXTENSION)--$(EXTVERSION).sql
 
 $(EXTENSION)--$(EXTVERSION).sql: $(EXTENSION).sql.in Makefile
 	$(SED) -e 's/@POINTCLOUD_VERSION@/$(EXTVERSION)/' $< > $@
+
+clean:
+	@rm -f $(EXTENSION)--$(EXTVERSION).sql
+	@rm -f $(EXTENSION).control
